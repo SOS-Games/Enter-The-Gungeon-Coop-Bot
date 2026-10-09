@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="CoopBot.local.props" Condition="Exists('CoopBot.local.props')" />
 
   <PropertyGroup>
     <TargetFramework>net35</TargetFramework>
@@ -9,9 +10,12 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <DebugType>none</DebugType>
-    <GamePath Condition="'$(GamePath)' == ''">G:\SteamLibrary\steamapps\common\Enter the Gungeon</GamePath>
+    <!-- Set your own paths in CoopBot.local.props (git-ignored; copy CoopBot.local.props.example) or on the command line: dotnet build -p:GamePath="..." -p:BepInExPath="..." -->
+    <GamePath Condition="'$(GamePath)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Enter the Gungeon</GamePath>
+    <!-- BepInEx lives in the r2modman profile, not the game folder. -->
+    <BepInExPath Condition="'$(BepInExPath)' == ''">$(GamePath)\BepInEx</BepInExPath>
     <ManagedPath>$(GamePath)\EtG_Data\Managed</ManagedPath>
-    <PluginDir>$(GamePath)\BepInEx\plugins\CoopBot</PluginDir>
+    <PluginDir>$(BepInExPath)\plugins\CoopBot</PluginDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,11 +30,11 @@
     <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(ManagedPath)\UnityEngine.IMGUIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.InputModule"><HintPath>$(ManagedPath)\UnityEngine.InputModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(ManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="BepInEx"><HintPath>$(GamePath)\BepInEx\core\BepInEx.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="0Harmony"><HintPath>$(GamePath)\BepInEx\core\0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BepInEx"><HintPath>$(BepInExPath)\core\BepInEx.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(BepInExPath)\core\0Harmony.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
-  <Target Name="DeployToGame" AfterTargets="Build" Condition="Exists('$(GamePath)\BepInEx')">
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="Exists('$(BepInExPath)')">
     <MakeDir Directories="$(PluginDir)" />
     <Copy SourceFiles="$(OutputPath)CoopBot.dll" DestinationFolder="$(PluginDir)" />
   </Target>

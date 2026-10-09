@@ -184,11 +184,12 @@ namespace CoopBot
                     aim = ep + lead + AimError(d);
                     Shoot = true;
                 }
-                if (!orderMoves && !CoverMove(room, pos, ep, d, los)) CombatMove(pos, ep, d, los, primPos, distToPrim);
+                bool lowHp = Bot.healthHaver.GetCurrentHealthPercentage() < 0.35f;
+                if (!orderMoves && !(lowHp && SeekHealing(pos, prim, room, 7f)) && !CoverMove(room, pos, ep, d, los)) CombatMove(pos, ep, d, los, primPos, distToPrim);
             }
             else if (!orderMoves)
             {
-                FollowMove(pos, primPos, distToPrim);
+                if (!SeekHealing(pos, prim, room, 14f)) FollowMove(pos, primPos, distToPrim);
             }
 
             AvoidProjectiles(pos);
@@ -311,6 +312,66 @@ namespace CoopBot
                 if (score < bestScore) { bestScore = score; best = e; }
             }
             return best;
+        }
+
+        // ---- Healing pickups ----
+        // Hearts/armor are collected by walking over them (HealthPickup trigger -> PrePickupLogic -> Pickup),
+        // which works for any non-ghost PlayerController, so the bot only has to path onto them.
+
+        private HealthPickup m_healTarget;
+        private float m_nextHealScan;
+        private float m_healGiveUp;
+
+        private static float Need(PlayerController p, bool armor)
+        {
+            if (p == null || p.IsGhost || p.healthHaver.IsDead) return 0f;
+            var hh = p.healthHaver;
+            if (p.HealthAndArmorSwapped) return armor ? 1f : 0f; // robot-style: armor is its health
+            if (armor) return hh.Armor < 1f ? 0.5f : 0.1f;
+            float max = hh.GetMaxHealth();
+            return max <= 0f ? 0f : 1f - hh.GetCurrentHealth() / max;
+        }
+
+        private bool WantsPickup(HealthPickup h, PlayerController prim)
+        {
+            bool armor = h.armorAmount > 0 && h.healAmount <= 0f;
+            float mine = Need(Bot, armor);
+            if (mine <= 0f) return false; // full health: walking over a heart does nothing (it just gets pushed)
+            float theirs = Need(prim, armor);
+            if (armor) return Bot.healthHaver.Armor < prim.healthHaver.Armor || (Bot.HealthAndArmorSwapped && !prim.HealthAndArmorSwapped);
+            return mine > theirs + 0.001f || (theirs <= 0f); // whoever is more hurt (by fraction) gets it
+        }
+
+        // Returns true when it is steering toward a heart this frame.
+        private bool SeekHealing(Vector2 pos, PlayerController prim, RoomHandler room, float maxDist)
+        {
+            if (!CoopBotPlugin.AutoPickupHealing.Value || prim == null) { m_healTarget = null; return false; }
+            if (m_healTarget != null && (!m_healTarget || !m_healTarget.gameObject.activeInHierarchy || !WantsPickup(m_healTarget, prim) || Time.time > m_healGiveUp)) m_healTarget = null;
+            if (m_healTarget == null && Time.time > m_nextHealScan)
+            {
+                m_nextHealScan = Time.time + 0.5f;
+                float best = maxDist;
+                foreach (var h in Object.FindObjectsOfType<HealthPickup>())
+                {
+                    if (h == null || !h.gameObject.activeInHierarchy || h.IsBeingSold) continue;
+                    if (h.GetComponentInParent<ShopItemController>() != null) continue;
+                    Vector2 hp = PositionOf(h);
+                    if (room != null && GameManager.Instance.Dungeon != null)
+                    {
+                        var hr = GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(hp.ToIntVector2(VectorConversions.Floor));
+                        if (hr != room) continue;
+                    }
+                    if (Pit(hp) || Vector2.Distance(hp, prim.specRigidbody.UnitCenter) > Leash) continue;
+                    float d = Vector2.Distance(pos, hp);
+                    if (d < best && WantsPickup(h, prim)) { best = d; m_healTarget = h; }
+                }
+                if (m_healTarget != null) m_healGiveUp = Time.time + 8f;
+            }
+            if (m_healTarget == null) return false;
+            Vector2 tp = PositionOf(m_healTarget);
+            MoveToward(pos, tp, 0.05f);
+            if (Move.sqrMagnitude < 0.01f) Move = (tp - pos).normalized;
+            return true;
         }
 
         // ---- Active items ----

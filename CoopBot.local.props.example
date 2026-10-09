@@ -1,0 +1,8 @@
+<Project>
+  <!-- Copy to CoopBot.local.props (git-ignored) and set your paths. -->
+  <PropertyGroup>
+    <GamePath>C:\Program Files (x86)\Steam\steamapps\common\Enter the Gungeon</GamePath>
+    <!-- For r2modman: %AppData%\r2modmanPlus-local\ETG\profiles\Default\BepInEx -->
+    <BepInExPath>$(GamePath)\BepInEx</BepInExPath>
+  </PropertyGroup>
+</Project>

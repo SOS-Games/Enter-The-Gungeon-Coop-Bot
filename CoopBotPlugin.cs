@@ -9,10 +9,11 @@ using UnityEngine;
 
 namespace CoopBot
 {
-    [BepInPlugin(Guid, "Coop Bot", "1.0.0")]
+    [BepInPlugin(Guid, "Coop Bot", Version)]
     public class CoopBotPlugin : BaseUnityPlugin
     {
         public const string Guid = "com.coopbot.etg";
+        public const string Version = "1.5.1";
 
         public static CoopBotPlugin Instance;
         public static ConfigEntry<KeyCode> OrderKey;
@@ -23,6 +24,13 @@ namespace CoopBot
         public static ConfigEntry<KeyCode> ItemKey;
         public static ConfigEntry<KeyCode> DropItemKey;
         public static ConfigEntry<float> CoverPreference;
+        // Remembers across game restarts that player 2 is the bot, so a continued mid-game save re-attaches it.
+        public static ConfigEntry<bool> BotActive;
+        public static ConfigEntry<KeyCode> PanelKey;
+        public static ConfigEntry<bool> DropItemsOnDeath;
+        public static ConfigEntry<bool> AutoPickupHealing;
+        public static ConfigEntry<KeyCode> TradeKey;
+        private bool m_panelOpen;
 
         private string m_message = "";
         private float m_messageUntil;
@@ -42,8 +50,14 @@ namespace CoopBot
         DropItemKey = Config.Bind("Controls", "DropItemKey", KeyCode.B, "Makes the bot drop its active item.");
         CoverPreference = Config.Bind("Bot", "CoverPreference", 0.5f, new ConfigDescription("How much the bot prefers hiding behind cover (0 = never, 1 = a lot).", new AcceptableValueRange<float>(0f, 1f)));
         ShowHints = Config.Bind("UI", "ShowHints", true, "Show on-screen messages from the bot.");
-            new Harmony(Guid).PatchAll(typeof(BotInputPatch)); new Harmony(Guid + ".doors").PatchAll(typeof(DoorDistancePatch)); new Harmony(Guid + ".cam").PatchAll(typeof(BotCameraPatch)); new Harmony(Guid + ".die").PatchAll(typeof(PrimaryDeathPatch)); new Harmony(Guid + ".clear").PatchAll(typeof(ClearGameDataPatch)); new Harmony(Guid + ".clear2").PatchAll(typeof(LoadSelectPatch));
-            Logger.LogInfo("Coop Bot loaded. Press " + OrderKey.Value + " in a run.");
+        // New key names so old configs (which saved I) pick up the new defaults. Game defaults use WASD, E, R, Q, F, G, I, Tab, Space, Esc, Ctrl, Shift, Enter, -, =, arrows.
+        PanelKey = Config.Bind("UI", "GearHudKey", KeyCode.K, "K: toggle the small bot gear HUD panel.");
+        TradeKey = Config.Bind("UI", "TradeWindowKey", KeyCode.L, "L: open/close the trade window (only outside combat).");
+        AutoPickupHealing = Config.Bind("Bot", "AutoPickupHealing", true, "Hurt bot walks over to hearts/armor in the room; it leaves them for you when you are more hurt.");
+        DropItemsOnDeath = Config.Bind("Bot", "DropItemsOnDeath", true, "When the bot dies (becomes a ghost) it drops its droppable non-starter guns/items where it fell. If false it keeps them and gets them back when revived.");
+        BotActive = Config.Bind("State", "BotActive", false, "Internal: true while player 2 is the bot (used to re-attach it after continuing a saved run).");
+            new Harmony(Guid).PatchAll(typeof(BotInputPatch)); new Harmony(Guid + ".doors").PatchAll(typeof(DoorDistancePatch)); new Harmony(Guid + ".cam").PatchAll(typeof(BotCameraPatch)); new Harmony(Guid + ".die").PatchAll(typeof(PrimaryDeathPatch)); new Harmony(Guid + ".clear").PatchAll(typeof(ClearGameDataPatch)); new Harmony(Guid + ".clear2").PatchAll(typeof(LoadSelectPatch)); new Harmony(Guid + ".save").PatchAll(typeof(MidGameSavePatch)); new Harmony(Guid + ".char").PatchAll(typeof(ContinueCharacterPatch)); new Harmony(Guid + ".char2").PatchAll(typeof(CoopPrefabSwapPatch)); new Harmony(Guid + ".p2").PatchAll(typeof(SecondaryPlayerFallbackPatch)); new Harmony(Guid + ".death").PatchAll(typeof(BotDeathDropPatch));
+            Logger.LogInfo("CoopBot (SOS-Games fork) v" + Version + " loaded. Press " + OrderKey.Value + " in a run.");
         }
 
         public static void Say(string text)
@@ -65,6 +79,14 @@ namespace CoopBot
             {
                 BotSpawner.Dismiss(false);
             }
+
+            BotSpawner.TryAdoptExisting();
+            BotLoadout.CheckRevive();
+
+            BotLoadout.TradeUpdate();
+            if (Input.GetKeyDown(PanelKey.Value) && !gm.IsLoadingLevel) m_panelOpen = !m_panelOpen;
+            if (Input.GetKeyDown(TradeKey.Value) && !gm.IsPaused && !gm.IsLoadingLevel && !gm.IsFoyer) { BotLoadout.ToggleTrade(); return; }
+            if (BotLoadout.TradeOpen) return; // window owns the input
 
             if (Input.GetKeyDown(CharacterKey.Value) && !gm.IsPaused && !gm.IsLoadingLevel)
             {
@@ -173,6 +195,9 @@ namespace CoopBot
         private void OnGUI()
         {
             DrawBotMenu();
+            if (m_panelOpen && !BotLoadout.TradeOpen) BotLoadout.DrawPanel();
+            if (!GameManager.HasInstance || GameManager.Instance.IsPaused) { if (BotLoadout.TradeOpen) BotLoadout.CloseTrade(); }
+            else BotLoadout.DrawTrade();
             if (!ShowHints.Value || Time.realtimeSinceStartup > m_messageUntil) return;
             if (m_style == null)
             {
@@ -206,10 +231,65 @@ namespace CoopBot
             }
         }
 
+        private static float s_secondarySeenAt = -1f;
+
+        // A continued mid-game save recreates player 2 as a plain co-op player (the game itself
+        // instantiates PlayerCoopCultist in GameManager.GeneratePlayersFromMidGameSave); our brain
+        // component is not saved. Re-attach the bot to that player instead of leaving it idle.
+        public static void TryAdoptExisting()
+        {
+            if (CoopBotPlugin.Brain != null) { s_secondarySeenAt = -1f; return; }
+            var gm = GameManager.Instance;
+            var sec = gm.SecondaryPlayer;
+            if (sec == null || gm.PrimaryPlayer == null || gm.IsFoyer || gm.IsLoadingLevel || gm.IsPaused
+                || gm.CurrentGameType != GameManager.GameType.COOP_2_PLAYER)
+            {
+                s_secondarySeenAt = -1f;
+                return;
+            }
+            // Give the load path time to finish (player data restore, controller reassignment).
+            if (s_secondarySeenAt < 0f) { s_secondarySeenAt = Time.realtimeSinceStartup; return; }
+            if (Time.realtimeSinceStartup - s_secondarySeenAt < 1.0f) return;
+            s_secondarySeenAt = -1f;
+            if (!CoopBotPlugin.BotActive.Value && SecondaryHasDevice()) return; // a real second player
+            Adopt(sec, "Bot re-attached to player 2.");
+        }
+
+        private static bool SecondaryHasDevice()
+        {
+            if (!BraveInput.HasInstanceForPlayer(1)) return false;
+            var actions = BraveInput.GetInstanceForPlayer(1).ActiveActions;
+            return actions != null && actions.Device != null;
+        }
+
+        private static void Adopt(PlayerController bot, string message)
+        {
+            var gm = GameManager.Instance;
+            var brain = bot.GetComponent<CoopBotBrain>();
+            if (brain == null) brain = bot.gameObject.AddComponent<CoopBotBrain>();
+            brain.Bot = bot;
+            CoopBotPlugin.Brain = brain;
+            CoopBotPlugin.BotActive.Value = true;
+            Saved = null; // the game already restored player 2's items from the save
+            if (gm.MainCameraController != null) gm.MainCameraController.ClearPlayerCache();
+            if (bot.specRigidbody != null) PhysicsEngine.Instance.RegisterOverlappingGhostCollisionExceptions(bot.specRigidbody);
+            BraveInput.ReassignAllControllers(null);
+            CoopBotPlugin.Say(message);
+            // After a continue the game rebuilt P2 as a Cultist: fix its gear from our snapshot (only if it matches this save).
+            gm.StartCoroutine(BotLoadout.ReconcileLater(bot));
+        }
+
         public static void Spawn()
         {
             var gm = GameManager.Instance;
             var prim = gm.PrimaryPlayer;
+
+            // Never create a second bot: take over a player 2 that already exists.
+            if (gm.SecondaryPlayer != null && gm.SecondaryPlayer != prim)
+            {
+                Adopt(gm.SecondaryPlayer, "Bot took over player 2. H: order it. Shift+H: dismiss.");
+                return;
+            }
 
             gm.CurrentGameType = GameManager.GameType.COOP_2_PLAYER;
             prim.ReinitializeMovementRestrictors();
@@ -226,6 +306,7 @@ namespace CoopBot
             var brain = go.AddComponent<CoopBotBrain>();
             brain.Bot = bot;
             CoopBotPlugin.Brain = brain;
+            CoopBotPlugin.BotActive.Value = true;
             gm.StartCoroutine(FinishSpawn(bot));
             CoopBotPlugin.Say("Bot online. H: order it to interact with what you point at. Shift+H: dismiss.");
         }
@@ -244,6 +325,7 @@ namespace CoopBot
             float until = Time.realtimeSinceStartup + 0.6f;
             while (Time.realtimeSinceStartup < until) yield return null;
             if (bot != null && Saved != null) Restore(bot, Saved);
+            else if (bot != null) BotLoadout.ReconcileIfSaved(bot);
         }
 
         public class Loadout
@@ -344,6 +426,7 @@ namespace CoopBot
 
         public static void Dismiss(bool announce)
         {
+            BotLoadout.CloseTrade();
             var gm = GameManager.Instance;
             var brain = CoopBotPlugin.Brain;
             CoopBotPlugin.Brain = null;
@@ -368,7 +451,11 @@ namespace CoopBot
             }
             if (gm.MainCameraController != null) gm.MainCameraController.ClearPlayerCache();
             BraveInput.ReassignAllControllers(null);
-            if (announce) CoopBotPlugin.Say("Bot dismissed.");
+            if (announce)
+            {
+                CoopBotPlugin.BotActive.Value = false; // explicit dismiss: the run is single player again
+                CoopBotPlugin.Say("Bot dismissed.");
+            }
         }
     }
 
@@ -466,7 +553,7 @@ namespace CoopBot
             if (brain == null || __instance == null || __instance == brain.Bot) return;
             var room = __instance.CurrentRoom;
             bool boss = room != null && room.area != null && room.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS;
-            if (!boss) BotSpawner.Dismiss(false);
+            if (!boss) { BotSpawner.Dismiss(false); CoopBotPlugin.BotActive.Value = false; BotLoadout.Clear(); }
         }
     }
 
